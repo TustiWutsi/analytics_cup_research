@@ -5,6 +5,7 @@ from tqdm import tqdm
 import requests
 import traceback
 from kloppy import skillcorner
+import gcsfs
 from .config import *
 from .utils import write_parquet_gcs
 
@@ -391,6 +392,7 @@ def normalize_tracking_direction(df_merged: pd.DataFrame) -> pd.DataFrame:
 
 
 def process_data(match_id: int, save_to_gcs=False) -> int:
+    fs = gcsfs.GCSFileSystem()
     try:
         if save_to_gcs:
             outpath = f"{PROCESSED_DIR}/{match_id}.parquet"

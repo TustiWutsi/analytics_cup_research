@@ -2,6 +2,7 @@ altair==5.5.0
 click==8.3.0
 dm-sonnet==2.0.0b0
 dm-tree==0.1.9
+gcsfs==2025.12.0
 graph_nets==1.1.0
 h5py==3.14.0
 hdbscan==0.8.40

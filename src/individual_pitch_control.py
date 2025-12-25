@@ -1,6 +1,7 @@
 import pandas as pd
 import json
 import numpy as np
+import random
 from tqdm import tqdm
 from pathlib import Path
 from mplsoccer import Pitch
@@ -9,6 +10,7 @@ from scipy.ndimage import gaussian_filter
 from sklearn.cluster import AgglomerativeClustering
 import concurrent.futures
 import gcsfs
+from functools import partial
 
 from .config import *
 from .utils import *
@@ -650,8 +652,9 @@ def extract_all_for_position_across_match(
     match_id: str,
     player_position: str,
     game_situation: tuple,
-    df: pd.DataFrame = None,
+    df=None,
     params: dict = PITCH_CONTROL_PARAMS,
+    sample_size: int = None,
     resolution: int = 1,
     pitch_length: float = 105,
     pitch_width: float = 68
@@ -661,10 +664,10 @@ def extract_all_for_position_across_match(
     for all frames corresponding to a specific game situation, across a whole match.
 
     Args:
-        df (pd.DataFrame): Processed tracking dataframe of a single match.
         match_id (str): The unique identifier of the match.
         player_position (str): The position group to filter.
         game_situation (tuple): Condition to filter frames (col_name, value).
+        df (pd.DataFrame): Processed tracking dataframe of a single match.
         params (dict): Simulation parameters.
         resolution (int): Grid resolution.
         pitch_length (float): Pitch length.
@@ -678,14 +681,18 @@ def extract_all_for_position_across_match(
     all_results = []
 
     # ---- Load dataframe ----
-    if not df:
-        df = pd.read_parquet(f"{PROCESSED_DIR}/{match_id}.parquet", storage_options={"token": "google_default"})
-    
+    if df is None:
+        df = pd.read_parquet(
+            f"{PROCESSED_DIR}/{match_id}.parquet",
+            storage_options={"token": "google_default"},
+        )
+
     # Filter on game situation
     df = df[df[game_situation[0]] == game_situation[1]]
     
     # ---- Identify player_ids for the position ----
-    player_ids_by_team = get_player_id_position(df, player_position)
+    player_position_skillcorner = PLAYER_POSITION_MAPPING[player_position]
+    player_ids_by_team = get_player_id_position(df, player_position_skillcorner)
     home_team_id = df["home_team_id"].iloc[0]
     away_team_id = df["away_team_id"].iloc[0]
     home_player_id = player_ids_by_team[home_team_id]
@@ -701,9 +708,10 @@ def extract_all_for_position_across_match(
 
     # ---- Iterate over frames ----
     frames = list(df["frame"].unique())
-    frames_test = frames[:5]  # For rapid testing
-    # frames_test = random.sample(frames, 50)
-    for frame in tqdm(frames_test, desc=f"Match {match_id}", leave=False):
+    if sample_size:
+        frames = random.sample(frames, sample_size)
+    #frames_test = frames[:5]  # For rapid testing
+    for frame in tqdm(frames, desc=f"Match {match_id}", leave=False):
 
         # Identify team in possession
         in_possession_team = df.loc[df["frame"] == frame, "team_in_possession"].values[0]
@@ -747,16 +755,12 @@ def extract_all_for_position_across_match(
     print(f"\n Processing complete: {len(all_results)} frames analyzed in total.")
     return all_results
 
-from mplsoccer import Pitch
-import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter
-
 def plot_half_pitch_individual_pitch_control(
     df,
     frame_results,
     sigma=1.0,
-    pitch_length=105,
-    pitch_width=68,
+    pitch_length=PITCH_LENGTH,
+    pitch_width=PITCH_WIDTH,
     half_pitch=True,
 ):
     """
@@ -985,7 +989,7 @@ def plot_half_pitch_individual_pitch_control(
 def process_match(
     file_path: str,
     player_position: str,
-    player_position_mapping: dict,
+    #player_position_mapping: dict,
     game_situation: str,
     params: dict = PITCH_CONTROL_PARAMS,
     resolution: int = 1
@@ -1015,7 +1019,7 @@ def process_match(
     try:
         results = extract_all_for_position_across_match(
             match_id=match_id,
-            player_position=player_position_mapping[player_position],
+            player_position=player_position,
             game_situation=game_situation,
             params=params,
             resolution=1
@@ -1025,3 +1029,42 @@ def process_match(
     except Exception as e:
         print(f" Error on match {match_id} : {e}")
     return match_id
+
+def process_all_matches_parallel(
+    player_position: str,
+    game_situation: tuple,
+    #player_position_mapping: dict = PLAYER_POSITION_MAPPING,
+    pitch_control_model_params: dict = PITCH_CONTROL_PARAMS,
+    pitch_control_resolution: int = 1,
+    max_workers: int = 10,
+):
+    """
+    Processes all detected matches in parallel to compute pitch control metrics.
+
+    Args:
+        player_position (str): The target player position to analyze.
+        player_position_mapping (dict): A dictionary mapping position names to internal IDs or codes.
+        game_situation (tuple): A tuple (column, value) defining the specific game situation to filter.
+        pitch_control_model_params (dict): Parameters for the pitch control model.
+        pitch_control_resolution (int): The resolution grid size for pitch control calculations.
+        max_workers (int): The maximum number of parallel workers.
+    """
+    
+    fs = gcsfs.GCSFileSystem()
+    parquet_files = fs.glob(f"{PROCESSED_DIR}/*.parquet")
+
+    print(f"{len(parquet_files)} matches detected")
+
+    worker = partial(
+        process_match,
+        player_position=player_position,
+        #player_position_mapping=player_position_mapping,
+        game_situation=game_situation,
+        params=pitch_control_model_params,
+        resolution=pitch_control_resolution
+    )
+
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=max_workers
+    ) as executor:
+        list(executor.map(worker, parquet_files))
