@@ -6,6 +6,7 @@ import requests
 import traceback
 from kloppy import skillcorner
 import gcsfs
+
 from .config import *
 from .utils import write_parquet_gcs
 

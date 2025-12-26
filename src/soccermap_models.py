@@ -10,6 +10,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torchmetrics
+from torch.utils.data import Dataset
 import pytorch_lightning as pl
 import tempfile
 from sklearn.model_selection import GroupShuffleSplit
@@ -517,44 +518,44 @@ class PytorchSoccerMapModel(pl.LightningModule):
     
 ########## FUNCTIONS TO RUN MODEL PREDICTIONS, CALCULATE NEW METRICS AND PLOT THEM ON PITCH MAPS ##########
     
-def predict_isct_maps(
+def predict_maps(
     match_id: int,
+    df: pd.DataFrame = None,
+    frame_results: list = None,
+    model_local: bool = True,
     # frame: int,
-    model_xpass,
-    model_xthreat,
-    tensorizer,
     sigma: float = 2.0,
 ):
     """
     Generates and plots 4 half-pitch visualization maps for a specific match frame:
-    1) Pitch Control
+    1) Individual Pitch Control (IPC)
     2) xPass (Expected Pass probability)
     3) xThreat (Expected Threat)
-    4) ISCT (Individual Space Controlled Threat) = PitchControl * xPass * xThreat
+    4) IPC * xPass * xThreat
 
     Also calculates weighted xT metrics based on the interaction of these maps.
 
     Args:
         match_id (int): The ID of the match to analyze.
-        model_xpass: The pre-trained xPass PyTorch model.
-        model_xthreat: The pre-trained xThreat PyTorch model.
         tensorizer: Function to convert dataframe rows into model input tensors.
         sigma (float): Standard deviation for Gaussian smoothing of the maps.
 
     Returns:
         tuple:
-            - isct (np.ndarray): The raw ISCT map (32, 50).
-            - weighted_xT (float): The weighted Expected Threat scalar.
-            - delta_weighted_xT (float): The weighted xT relative to the ball's current xT.
+            - iscT (float): The weighted Expected Threat scalar.
+            - iscT_delta (float): The weighted xT relative to the ball's current xT.
     """
 
     # --------------------------------------------------
     #  Pitch control for this frame
     # --------------------------------------------------
     
-    pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
-    with fs.open(pitch_control_path, "rb") as f:
-        pitch_control_results = np.load(f, allow_pickle=True)["results"].tolist()
+    if frame_results is None:
+        pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+        with fs.open(pitch_control_path, "rb") as f:
+            pitch_control_results = np.load(f, allow_pickle=True)["results"].tolist()
+    else:
+        pitch_control_results = frame_results
     
     # pc_entry = next(
     #    d for d in pitch_control_results
@@ -571,12 +572,27 @@ def predict_isct_maps(
     # --------------------------------------------------
     #  Model predictions (FULL pitch)
     # --------------------------------------------------
-    df = read_parquet_gcs(fs, gcs_path=f"{PROCESSED_DIR}/{match_id}.parquet")
+    if df is None:
+        df = read_parquet_gcs(fs, gcs_path=f"{PROCESSED_DIR}/{match_id}.parquet")
     frame_df = df.query("frame == @frame")
     frame_df['label'] = 0
     
+    tensorizer = ToSoccerMapPassSuccessTensorFromFrame(dim=(64, 50))
     x, mask, _ = tensorizer(frame_df)
     x = x.unsqueeze(0)
+    
+    if model_local:
+        best_ckpt_xpass_path = f"{MODELS_DIR}/best_xpass.ckpt"
+        best_ckpt_xthreat_path = f"{MODELS_DIR}/best_xthreat.ckpt"
+        
+        model_xpass = load_checkpoint_from_local(best_ckpt_xpass_path, PytorchSoccerMapModel)
+        model_xthreat = load_checkpoint_from_local(best_ckpt_xthreat_path, PytorchSoccerMapModel)
+    else:
+        best_ckpt_xpass_path = f"{SOCCERMAP_MODELS_DIR}/best_xpass.ckpt"
+        best_ckpt_xthreat_path = f"{SOCCERMAP_MODELS_DIR}/best_xthreat.ckpt"
+
+        model_xpass = load_checkpoint_from_gcs(best_ckpt_xpass_path, PytorchSoccerMapModel)
+        model_xthreat = load_checkpoint_from_gcs(best_ckpt_xthreat_path, PytorchSoccerMapModel)
 
     model_xpass.eval()
     model_xthreat.eval()
@@ -596,20 +612,20 @@ def predict_isct_maps(
     xthreat_smooth = gaussian_filter(xthreat, sigma=sigma)
 
     # --------------------------------------------------
-    #  ISCT computation
+    #  iscT computation
     # --------------------------------------------------
     # 
     isct = pitch_control * xpass_half * xthreat_half
     isct_smooth = gaussian_filter(isct, sigma=sigma)
 
     # --------------------------------------------------
-    #  Weighted xT
+    #  iscT
     # --------------------------------------------------
     weight = pitch_control * xpass_half
-    weighted_xT = np.sum(weight * xthreat_half) / (np.sum(weight) + 1e-8)
+    iscT = np.sum(weight * xthreat_half) / (np.sum(weight) + 1e-8)
     
     # ==================================================
-    #  delta-weighted xT
+    #  iscT_delta
     # ==================================================
     # Convert ball position to grid index
     # 
@@ -620,7 +636,7 @@ def predict_isct_maps(
     xT_ball = xthreat_half[by, bx]
 
     delta_xT = xthreat_half - xT_ball
-    delta_weighted_xT = np.sum(weight * delta_xT) / (np.sum(weight) + 1e-8)
+    iscT_delta = np.sum(weight * delta_xT) / (np.sum(weight) + 1e-8)
 
     # --------------------------------------------------
     # Identify attacking and defending players
@@ -657,10 +673,10 @@ def predict_isct_maps(
     axes = axes.flatten()
 
     titles = [
-        "Pitch Control",
+        "Individual Pitch Control (IPC)",
         "xPass",
-        "xThreat",
-        "ISCT (PC × xPass × xThreat)"
+        "xT",
+        "IPC × xPass × xThreat"
     ]
 
     maps = [
@@ -725,44 +741,55 @@ def predict_isct_maps(
     fig.legend(handles, labels, loc="lower center", ncol=3)
 
     plt.suptitle(
-        f"Indivisual Space Controlled Threat (ISCT) decomposition — {match_name}\nFocus Player: {player_name}",
+        f"Indivisual Space Controlled Threat (iscT) maps decomposition — {match_name}\nFocus Player: {player_name}",
         fontsize=16
     )
     plt.tight_layout()
     plt.show()
 
-    return isct, weighted_xT, delta_weighted_xT
+    return iscT, iscT_delta
 
 def compute_metrics(
     meta: pd.DataFrame,
-    model_xpass,
-    model_xthreat,
-    tensorizer,
-    batch_size: int,
+    df: pd.DataFrame = None,
+    frame_results: list = None,
+    model_local: bool = True,
+    batch_size: int = 1,
+    save_to_gcs: bool = False
 ):
     """
-    Computes `weighted_xT` and `delta_weighted_xT` for an entire dataset using batch processing.
+    Computes `iscT` and `iscT_delta` for an entire dataset using batch processing.
     
     Iterates through metadata, groups by match ID to minimize I/O operations, loads 
     pitch control and tracking data once per match, and runs model inference in batches.
 
     Args:
         meta (pd.DataFrame): Metadata dataframe containing match_ids and frames to process.
-        model_xpass: The pre-trained xPass model.
-        model_xthreat: The pre-trained xThreat model.
-        tensorizer: Function to process dataframe rows into tensors.
         batch_size (int): Number of frames to process in a single inference pass.
 
     Returns:
         pd.DataFrame: The updated metadata dataframe with computed metrics columns.
     """
+    
+    if model_local:
+        best_ckpt_xpass_path = f"{MODELS_DIR}/best_xpass.ckpt"
+        best_ckpt_xthreat_path = f"{MODELS_DIR}/best_xthreat.ckpt"
+        
+        model_xpass = load_checkpoint_from_local(best_ckpt_xpass_path, PytorchSoccerMapModel)
+        model_xthreat = load_checkpoint_from_local(best_ckpt_xthreat_path, PytorchSoccerMapModel)
+    else:
+        best_ckpt_xpass_path = f"{SOCCERMAP_MODELS_DIR}/best_xpass.ckpt"
+        best_ckpt_xthreat_path = f"{SOCCERMAP_MODELS_DIR}/best_xthreat.ckpt"
 
+        model_xpass = load_checkpoint_from_gcs(best_ckpt_xpass_path, PytorchSoccerMapModel)
+        model_xthreat = load_checkpoint_from_gcs(best_ckpt_xthreat_path, PytorchSoccerMapModel)
+    
     model_xpass.eval()
     model_xthreat.eval()
 
     meta_out = meta.copy()
-    meta_out["weighted_xT"] = np.nan
-    meta_out["delta_weighted_xT"] = np.nan
+    meta_out["iscT"] = np.nan
+    meta_out["iscT_delta"] = np.nan
     
     player_position = meta_out.player_position_role.iloc[0].lower().replace(" ", "_")
     game_situation = meta_out.game_situation.iloc[0].lower().replace(" ", "_")
@@ -773,22 +800,28 @@ def compute_metrics(
     for match_id, meta_match in tqdm(meta.groupby("match_id"), desc="Matches"):
 
         # ---------- Pitch control ----------
-        PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/pitch_control_{player_position}_{game_situation}"
-        pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
-        if not fs.exists(pitch_control_path):
-            continue
-
-        with fs.open(pitch_control_path, "rb") as f:
-            pc_results = np.load(f, allow_pickle=True)["results"].tolist()
+        if frame_results is None:
+            PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/pitch_control_{player_position}_{game_situation}"
+            pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+            if not fs.exists(pitch_control_path):
+                continue
+    
+            with fs.open(pitch_control_path, "rb") as f:
+                pc_results = np.load(f, allow_pickle=True)["results"].tolist()
+        else:
+            pc_results = frame_results
 
         pc_by_frame = {d["frame"]: d for d in pc_results}
 
         # ---------- Frame data ----------
-        df_path = f"{PROCESSED_DIR}/{match_id}.parquet"
-        if not fs.exists(df_path):
-            continue
-
-        df_match = read_parquet_gcs(fs, df_path)
+        if df is None:
+            df_path = f"{PROCESSED_DIR}/{match_id}.parquet"
+            if not fs.exists(df_path):
+                continue
+    
+            df_match = read_parquet_gcs(fs, df_path)
+        else:
+            df_match = df
 
         # ---------- Loop frames (batched) ----------
         tensors = []
@@ -806,7 +839,8 @@ def compute_metrics(
 
             frame_df = frame_df.copy()
             frame_df["label"] = 0
-
+            
+            tensorizer = ToSoccerMapPassSuccessTensorFromFrame(dim=(64, 50))
             x, _, _ = tensorizer(frame_df)
             tensors.append(x)
             frame_refs.append((idx, frame_df, pc_by_frame[frame]))
@@ -831,10 +865,11 @@ def compute_metrics(
                 model_xthreat,
                 meta_out,
             )
-            
-    RESULTS_DIR = f"{BASE_GCS_PATH}/results"
-    output_path = f"{RESULTS_DIR}/results_{player_position}_{game_situation}.parquet"
-    write_parquet_gcs(meta_out, output_path)
+    
+    if save_to_gcs:
+        RESULTS_DIR = f"{BASE_GCS_PATH}/results"
+        output_path = f"{RESULTS_DIR}/results_{player_position}_{game_situation}.parquet"
+        write_parquet_gcs(meta_out, output_path)
 
     return meta_out
 
@@ -879,7 +914,7 @@ def _run_batch(
         weight = pitch_control * xpass_half
         denom = np.sum(weight) + 1e-8
 
-        meta_out.at[meta_idx, "weighted_xT"] = np.sum(weight * xthreat_half) / denom
-        meta_out.at[meta_idx, "delta_weighted_xT"] = (
+        meta_out.at[meta_idx, "iscT"] = np.sum(weight * xthreat_half) / denom
+        meta_out.at[meta_idx, "iscT_delta"] = (
             np.sum(weight * (xthreat_half - xT_ball)) / denom
         )

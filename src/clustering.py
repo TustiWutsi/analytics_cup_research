@@ -1,3 +1,4 @@
+import os
 import fsspec
 import gcsfs
 import numpy as np
@@ -15,7 +16,6 @@ from sklearn.cluster import KMeans
 import joblib
 import umap
 import hdbscan
-import os
 
 from .config import *
 from .utils import *
@@ -197,101 +197,145 @@ def prepare_clustering_features_all_matches(player_position: str, game_situation
     meta = pd.DataFrame(meta_info)
     return X, meta, frames_inputs
 
-def prepare_meta_df_single_match(
+def prepare_clustering_features_single_match(
     results: list,
     processed_df: pd.DataFrame,
     match_id: str,
-    game_situation_name: str
-) -> pd.DataFrame:
+    game_situation: tuple
+):
     """
-    Extracts the metadata DataFrame for valid frames.
+    Transforms raw pitch control results into a feature matrix for clustering.
+
+    This function processes data for a single match. It filters invalid frames,
+    flattens pitch control maps, and extracts contextual metadata.
 
     Args:
-        results (list): List of dictionaries containing pitch control results.
+        results (list): List of dictionaries containing pitch control results (from .npz).
         processed_df (pd.DataFrame): DataFrame containing tracking/possession data.
-        match_id (str): The identifier of the match.
-        game_situation_name (str): The name of the game situation.
+        match_id (str): The identifier of the match being processed.
+        game_situation (tuple): The specific game situation (column, value).
 
     Returns:
-        pd.DataFrame: A DataFrame containing metadata for all valid frames.
+        tuple:
+            - X (np.ndarray): The feature matrix (n_samples, n_features).
+            - meta (pd.DataFrame): Metadata dataframe aligned with X.
     """
-    
-    if not results:
-        return pd.DataFrame()
-
+    feature_vectors = []
     meta_info = []
 
-    if processed_df is not None and not processed_df.empty:
-        # Create a lookup dictionary for faster access than .loc on large DFs
-        possession_lookup = (
-            processed_df
-            .set_index(["frame", "player_id"])
-            [["player_short_name", "team_name", "time_s"]]
-            .to_dict(orient="index")
-        )
-        all_teams = processed_df["team_name"].dropna().unique().tolist()
-    else:
-        possession_lookup = {}
-        all_teams = []
+    # --- Prepare team names (for opponent deduction) ---
+    all_teams = (
+        processed_df["team_name"].unique().tolist()
+        if processed_df is not None and "team_name" in processed_df.columns
+        else []
+    )
 
-    # --- Iterate over results ---
+    if not results:
+        return None, None, None
+
+    # --- Iterate over valid results ---
     for item in results:
-        
-        # 1. Validation: Skip critical NaNs
-        p_pos = item.get("player_position", (np.nan, np.nan))
+        # Exclusion if critical NaNs exist
+        player_position_coords = item.get("player_position", (np.nan, np.nan))
         if (
-            np.isnan(p_pos[0]) or np.isnan(p_pos[1]) or
+            np.isnan(player_position_coords[0]) or np.isnan(player_position_coords[1]) or
             np.isnan(item.get("distance_to_nearest_teammate", np.nan)) or
             np.isnan(item.get("distance_to_nearest_opponent", np.nan))
         ):
-            continue
+            continue  # Skip this frame
 
-        # 2. Validation: Skip Pitch Control outliers
-        pitch_flat = item["pitch_control_map"].flatten()
-        if np.sum(pitch_flat > 0.5) > 70:
-            continue
-
-        frame = item.get("frame")
         player_id = item.get("player_id")
+        frame = item.get("frame")
 
-        # 3. Context Lookup
-        player_name = None
-        player_team = None
-        opponent_team = None
-        minute = None
-
-        # Fast lookup using the dictionary created above
-        row_data = possession_lookup.get((frame, player_id))
+        # (1) Flatten the Pitch Control map
+        pitch_flat = item["pitch_control_map"].flatten()
         
-        if row_data:
-            player_name = row_data.get("player_short_name")
-            player_team = row_data.get("team_name")
-            time_s = row_data.get("time_s")
-            
-            if time_s is not None:
-                minute = int(time_s // 60)
+        # Remove outliers based on pitch control coverage
+        count_gt_05 = np.sum(pitch_flat > 0.5)
+        if count_gt_05 > 70:
+            continue
 
-            # Deduce opponent
-            if player_team and all_teams:
-                # Find the other team in the list
-                ops = [t for t in all_teams if t != player_team]
-                if ops:
-                    opponent_team = ops[0]
+        # (2) Contextual features
+        defensive_lines = np.array(item["defensive_lines"], dtype=float)
+        defensive_lines = np.pad(
+            defensive_lines, (0, 3 - len(defensive_lines)),
+            mode='constant', constant_values=np.nan
+        )
 
-        # 4. Append to list
+        ball_x, ball_y = item["ball_position"]
+        in_possession = 1.0 if item["in_possession"] else 0.0
+
+        context_features = np.array([
+            *defensive_lines,
+            ball_x,
+            ball_y,
+            in_possession,
+            item["distance_to_ball"],
+            item["distance_to_nearest_teammate"],
+            item["distance_to_nearest_opponent"]
+        ], dtype=float)
+
+        full_vector = np.concatenate([pitch_flat, context_features])
+        feature_vectors.append(full_vector)
+
+        # (3) Retrieve info from the processed DataFrame
+        if processed_df is not None:
+            row = processed_df[
+                (processed_df["frame"] == frame) &
+                (processed_df["player_id"] == player_id)
+            ]
+            if not row.empty:
+                row = row.iloc[0]
+                player_name = row.get("player_short_name", None)
+                player_team = row.get("team_name", None)
+                
+                time_s = row.get("time_s", None)
+                minute = int(time_s // 60) if time_s is not None else None
+
+                # Deduce opponent
+                opponent_team = None
+                if all_teams and player_team in all_teams:
+                    op_candidates = [t for t in all_teams if t != player_team]
+                    opponent_team = op_candidates[0] if op_candidates else None
+            else:
+                player_name = None
+                player_team = None
+                opponent_team = None
+                minute = None
+        else:
+            player_name = None
+            player_team = None
+            opponent_team = None
+            minute = None
+
+        # (4) Add to meta_info
         meta_info.append({
             "match_id": match_id,
             "frame": frame,
             "player_id": player_id,
-            "player_position_role": item.get("player_position_role"),
+            "player_position_role": item.get("player_position_role", None),
             "player_name": player_name,
             "player_team": player_team,
             "opponent_team": opponent_team,
             "minute": minute,
-            "game_situation": game_situation_name
+            "game_situation": game_situation[1]
         })
 
-    return pd.DataFrame(meta_info)
+    if not feature_vectors:
+        return None, None
+
+    # --- Final feature matrix ---
+    X = np.vstack(feature_vectors)
+
+    # --- Handle remaining NaNs (replace with column mean) ---
+    nan_mask = np.isnan(X)
+    if np.any(nan_mask):
+        col_means = np.nanmean(X, axis=0)
+        inds = np.where(nan_mask)
+        X[inds] = np.take(col_means, inds[1])
+
+    meta = pd.DataFrame(meta_info)
+    return X, meta
 
 def train_pca_kmeans_clustering(X, pca_components, n_clusters, dim=(32,50), save_to_gcs=False):
     N_SPATIAL = dim[0]*dim[1]
@@ -340,7 +384,7 @@ def predict_clusters(
     game_situation: tuple, 
     X, 
     meta, 
-    local: bool = False,
+    model_local: bool = False,
     cluster_mapping: dict = CLUSTERS_MAPPING
 ):
     """
@@ -361,7 +405,7 @@ def predict_clusters(
     situation_value = game_situation[1]
     mapping_key = f"{player_position}_{situation_value}"
 
-    if not local:
+    if not model_local:
         PIPELINE_PATH_GCS = f"{CLUSTERING_DIR}/clustering_pipeline_{player_position}_{situation_value}.joblib"
         
         if fs.exists(PIPELINE_PATH_GCS):
@@ -384,7 +428,7 @@ def predict_clusters(
             meta['cluster_gathered'] = None
             
     else:
-        PIPELINE_PATH_LOCAL = f"models/clustering_pipeline_{player_position}_{situation_value}.joblib"
+        PIPELINE_PATH_LOCAL = f"{MODELS_DIR}/clustering_pipeline_{player_position}_{situation_value}.joblib"
         
         if os.path.exists(PIPELINE_PATH_LOCAL):
             try:
@@ -504,12 +548,15 @@ def plot_cluster_summary_pitch_control(
         x = np.linspace(0, pitch_length, W)
         y = np.linspace(0, pitch_width, H)
         bin_statistic = dict(statistic=mean_map, x_grid=x, y_grid=y)
+        
+        cmap = plt.cm.RdBu_r
+        cmap.set_bad(color="white")
 
         pitch.draw(ax=ax)
         pcm = pitch.heatmap(
             bin_statistic,
             ax=ax,
-            cmap="viridis",
+            cmap=cmap,
             vmin=0,
             vmax=1,
             alpha=0.9,
