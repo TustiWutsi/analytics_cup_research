@@ -2,6 +2,8 @@ import pandas as pd
 import gcsfs
 import io
 import pytorch_lightning as pl
+from sklearn.pipeline import Pipeline
+import joblib
 
 fs = gcsfs.GCSFileSystem(token="google_default")
 
@@ -23,19 +25,21 @@ def save_npz_to_gcs(array_dict: dict, gcs_path: str):
         with fsspec.open(gcs_path, "wb") as f:
             f.write(buffer.read())
             
+def save_pipeline_gcs(fs: gcsfs.GCSFileSystem, gcs_path: str, pipeline: Pipeline):
+    with fs.open(gcs_path, "wb") as f:
+        joblib.dump(pipeline, f)
+            
+def load_pipeline_gcs(fs: gcsfs.GCSFileSystem,gcs_path: str) -> Pipeline:
+    with fs.open(gcs_path, "rb") as f:
+        return joblib.load(f)
+    
+def load_pipeline_local(file_path: str):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Pipeline file not found locally at: {file_path}")
+    pipeline = joblib.load(file_path)
+    return pipeline
+            
 def load_checkpoint_from_gcs(gcs_path: str, model_class: pl.LightningModule):
-    """
-    Downloads a checkpoint from Google Cloud Storage (GCS) to a temporary file
-    and loads the Lightning model.
-
-    Args:
-        gcs_path (str): The GCS path to the checkpoint (e.g., "gs://bucket/model/best.ckpt").
-        model_class (pl.LightningModule): The class of the model (e.g., PytorchSoccerMapModel).
-
-    Returns:
-        pl.LightningModule: The loaded PyTorch Lightning model in evaluation mode.
-    """
-
     # 1) Create a local temporary file
     with tempfile.NamedTemporaryFile(suffix=".ckpt", delete=True) as tmp:
 

@@ -1,9 +1,15 @@
+import numpy as np
+
+# GCS PATHES
 BUCKET_NAME = "arthur_tmp"
 BASE_GCS_PATH = f"gs://{BUCKET_NAME}/analytics_cup"
 PROCESSED_DIR = f"{BASE_GCS_PATH}/processed"
 CLUSTERING_DIR = f"{BASE_GCS_PATH}/clustering"
 RESULTS_DIR = f"{BASE_GCS_PATH}/results"
 SOCCERMAP_MODELS_DIR = f"{BASE_GCS_PATH}/soccermap_model"
+
+# LOCAL PATHES
+MODELS_DIR = "models"
 
 X_MIN, X_MAX = -52, 52
 Y_MIN, Y_MAX = -34, 34
