@@ -522,8 +522,8 @@ def predict_maps(
     match_id: int,
     df: pd.DataFrame = None,
     frame_results: list = None,
+    frame: int = None,
     model_local: bool = True,
-    # frame: int,
     sigma: float = 2.0,
 ):
     """
@@ -557,12 +557,14 @@ def predict_maps(
     else:
         pitch_control_results = frame_results
     
-    # pc_entry = next(
-    #    d for d in pitch_control_results
-    #    if d["frame"] == frame
-    # )
-    pc_entry = pitch_control_results[0]
-    frame = pc_entry['frame']
+    if frame:
+        pc_entry = next(
+           d for d in pitch_control_results
+           if d["frame"] == frame
+        )
+    else:
+        pc_entry = pitch_control_results[0]
+        frame = pc_entry['frame']
 
     pitch_control = pc_entry["pitch_control_map"]  # (32,50)
     pitch_control_smooth = gaussian_filter(pitch_control, sigma=sigma)

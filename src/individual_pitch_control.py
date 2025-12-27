@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 from sklearn.cluster import AgglomerativeClustering
 import concurrent.futures
+import fsspec
 import gcsfs
 from functools import partial
 

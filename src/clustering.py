@@ -585,7 +585,7 @@ def plot_cluster_summary_pitch_control(
             f"Avg closest opponent distance : {fmt(mean_dist_op)} m"
         )
 
-        ax.set_title(f"Cluster {i}", fontsize=13, fontweight="bold")
+        ax.set_title(f"Cluster {i}", fontsize=17, fontweight="bold")
         ax.text(0.5, -0.05, stats_text, transform=ax.transAxes,
                 fontsize=17, ha="center", va="top", linespacing=1.6)
 

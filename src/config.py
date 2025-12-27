@@ -10,6 +10,7 @@ RESULTS_DIR = f"{BASE_GCS_PATH}/results"
 SOCCERMAP_MODELS_DIR = f"{BASE_GCS_PATH}/soccermap_model"
 
 # LOCAL PATHES
+PROCESSED_DIR_LOCAL = "outputs/processed"
 MODELS_DIR = "models"
 
 X_MIN, X_MAX = -52, 52

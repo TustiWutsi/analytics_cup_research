@@ -6,6 +6,48 @@ from matplotlib import colors
 from mplsoccer import Pitch
 from scipy.ndimage import gaussian_filter
 
+def plot_isct_delta_by_player_single_match(df):
+    match_id = df["match_id"].iloc[0]
+    player_position = df["player_position_role"].iloc[0]
+    game_situation = df["game_situation"].iloc[0]
+
+    players = df["player_name"].unique()
+    n_players = len(players)
+
+    n_cols = min(3, n_players)
+    n_rows = int(np.ceil(n_players / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
+
+    for ax, player in zip(axes.flatten(), players):
+        values = df.loc[df["player_name"] == player, "iscT_delta"]
+
+        mean = values.mean()
+        std = values.std()
+
+        ax.hist(values, bins=30, density=True, alpha=0.7)
+
+        ax.axvline(mean, linestyle="--", linewidth=2, label=f"μ = {mean:.2f}")
+
+        ax.axvline(mean - std, linestyle=":", linewidth=1, label=f"σ = {std:.2f}")
+        ax.axvline(mean + std, linestyle=":", linewidth=1)
+
+        ax.set_title(player)
+        ax.set_xlabel("iscT_delta")
+        ax.set_ylabel("Density")
+        ax.legend(fontsize=8)
+
+    for ax in axes.flatten()[len(players):]:
+        ax.axis("off")
+
+    fig.suptitle(
+        f"iscT_delta of {player_position} when {game_situation} during the game {match_id}",
+        fontsize=16
+    )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+
 def plot_player_percentiles(
     meta_out: pd.DataFrame,
     value_col: str = "iscT_delta",
@@ -38,7 +80,10 @@ def plot_player_percentiles(
         Table of percentiles (players x game_situations)
     """
     
-    meta_out['game_situation'] = meta_out['game_situation'].replace({'defending_transition': 'transition'})
+    meta_out['game_situation'] = meta_out['game_situation'].replace({
+        'defending_transition': 'transition',
+        'defending_quick_break': 'quick_break'
+    })
     
     if game_situation_filter:
         meta_out = meta_out[meta_out.game_situation == game_situation_filter]
