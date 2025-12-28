@@ -142,7 +142,10 @@ def plot_player_percentiles(
 
     ax.set_xlabel(dimension_col)
     ax.set_ylabel("Player")
-    ax.set_title(f"Percentile of iscT-Δ by player & {dimension_col}")
+    if dimension_col == 'cluster_gathered':
+        ax.set_title(f"Percentile of iscT-Δ by cluster - Attacking against {game_situation_filter} defense")
+    else:
+        ax.set_title(f"Percentile of iscT-Δ by {dimension_col}")
 
     # ---------------------------------------------------
     # 5) Annotate each cell with percentile value

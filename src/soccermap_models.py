@@ -13,6 +13,7 @@ import torch.nn as nn
 import torchmetrics
 from torch.utils.data import Dataset
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint
 import tempfile
 from sklearn.model_selection import GroupShuffleSplit
 from torch.utils.data import DataLoader
@@ -528,6 +529,50 @@ class PytorchSoccerMapModel(pl.LightningModule):
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr) # The optimizer updates all model parameters based on gradients from the loss function.
+    
+def train_soccermap_model(
+    task: str,
+    train_loader,
+    val_loader,
+    max_epochs: int = 10
+):
+    """
+    Initializes and trains the SoccerMap model using PyTorch Lightning.
+
+    Configures a ModelCheckpoint callback to save the best model based on validation loss
+    and runs the training loop for a specified number of epochs.
+
+    Args:
+        task (str): The specific task name (e.g., 'pass' or 'goal') used for file naming.
+        train_loader (DataLoader): The DataLoader for the training set.
+        val_loader (DataLoader): The DataLoader for the validation set.
+        max_epochs (int): The maximum number of training epochs (default: 10).
+
+    Returns:
+        pl.Trainer: The PyTorch Lightning Trainer object after fitting the model.
+    """
+    
+    checkpoint_callback = ModelCheckpoint(
+        dirpath="/tmp/checkpoints",
+        filename=f"soccermap_{task}_{epoch:02d}-{val/loss:.4f}",
+        save_top_k=1,
+        monitor="val/loss",
+        mode="min"
+    )
+    
+    model = PytorchSoccerMapModel(lr=1e-4)
+
+    trainer = pl.Trainer(
+        max_epochs=10,
+        accelerator="cpu",
+        devices=1,
+        callbacks=[checkpoint_callback],
+        log_every_n_steps=50,
+    )
+    
+    trainer.fit(model, train_loader, val_loader)
+    
+    return trainer
     
 ########## FUNCTIONS TO RUN MODEL PREDICTIONS, CALCULATE NEW METRICS AND PLOT THEM ON PITCH MAPS ##########
 
