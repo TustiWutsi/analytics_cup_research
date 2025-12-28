@@ -61,7 +61,7 @@ def plot_player_percentiles(
 ):
     """
     Plot a heatmap (players × game_situations) where values are
-    percentiles of mean delta_weighted_xT within each dimension chosen.
+    percentiles of mean iscT_delta within each dimension chosen.
 
     Parameters
     ----------
@@ -169,8 +169,8 @@ def plot_player_percentiles(
     plt.show()
 
     return pivot_percentiles
-
-def plot_extreme_frames_pitch_control(
+    
+def plot_top_bottom_isct_delta(
     player_name: str,
     player_position: str,
     game_situation: tuple,
@@ -179,36 +179,31 @@ def plot_extreme_frames_pitch_control(
 ):
     """
     Plot 6 half-pitches:
-      - top row: 3 frames with highest iscT_delta
-      - bottom row: 3 frames with lowest iscT_delta
+    - top row: 3 frames with highest iscT_delta
+    - bottom row: 3 frames with lowest iscT_delta
 
-    Heatmap = pitch control smoothed
-    
-    Args:
-        player_name (str): Name of the player to analyze.
-        player_position (str): Player's position role.
-        game_situation (tuple): Game situation filter (column, value).
-        sigma (float): Smoothing factor for the heatmap.
-        save_load_method (str): 'local' or 'gcp'.
+    Heatmap = pitch control (smoothed)
     """
 
-    if save_load_method == "local":
-        base_path = BASE_LOCAL_PATH
-    elif save_load_method == "gcp":
+    # -------------------------------------------------
+    # Paths
+    # -------------------------------------------------
+    if save_load_method == "gcp":
         base_path = BASE_GCS_PATH
-        
+        fs = gcsfs.GCSFileSystem()
+    else:
+        base_path = BASE_LOCAL_PATH
+        fs = None
+
     RESULTS_DIR = f"{base_path}/results"
     PROCESSED_DIR = f"{base_path}/processed"
     PITCH_CONTROL_DIR = f"{base_path}/pitch_control_{player_position}_{game_situation[1]}"
 
-    # Initialize filesystem for GCS if needed
-    fs = gcsfs.GCSFileSystem() if save_load_method == "gcp" else None
-
     # -------------------------------------------------
-    # Load meta dataframe
+    # Load meta
     # -------------------------------------------------
     meta_path = f"{RESULTS_DIR}/results_{player_position}_{game_situation[1]}.parquet"
-    
+
     if save_load_method == "gcp":
         with fs.open(meta_path, "rb") as f:
             meta = pd.read_parquet(f)
@@ -220,13 +215,15 @@ def plot_extreme_frames_pitch_control(
         (meta["game_situation"] == game_situation[1])
     ].copy()
 
+    # remove NaNs and in-possession frames
     meta_sub = meta_sub.dropna(subset=["iscT_delta"])
+    #meta_sub = meta_sub[meta_sub["in_possession"] == False]
 
     if len(meta_sub) == 0:
-        raise ValueError("No valid rows for this player / situation.")
+        raise ValueError("No valid frames after filtering.")
 
     # -------------------------------------------------
-    # Select top & bottom frames
+    # Select TOP / BOTTOM 3
     # -------------------------------------------------
     top3 = meta_sub.sort_values("iscT_delta", ascending=False).head(3)
     bot3 = meta_sub.sort_values("iscT_delta", ascending=True).head(3)
@@ -234,7 +231,7 @@ def plot_extreme_frames_pitch_control(
     selected = pd.concat([top3, bot3], axis=0).reset_index(drop=True)
 
     # -------------------------------------------------
-    # Plot setup
+    # Pitch
     # -------------------------------------------------
     pitch = Pitch(
         pitch_type="custom",
@@ -246,22 +243,24 @@ def plot_extreme_frames_pitch_control(
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     axes = axes.flatten()
+    
+    pcm_for_cbar = None
 
     # -------------------------------------------------
     # Loop over frames
     # -------------------------------------------------
     for i, row in selected.iterrows():
+        ax = axes[i]
+
         match_id = row["match_id"]
         frame = row["frame"]
         delta_xt = row["iscT_delta"]
-
-        ax = axes[i]
 
         # ---------------------------
         # Load pitch control
         # ---------------------------
         pc_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
-        
+
         try:
             if save_load_method == "gcp":
                 with fs.open(pc_path, "rb") as f:
@@ -271,27 +270,33 @@ def plot_extreme_frames_pitch_control(
                 with open(pc_path, "rb") as f:
                     data = np.load(f, allow_pickle=True)
                     pc_results = data["results"].tolist()
-        except Exception as e:
-            print(f"Error loading pitch control for {match_id}: {e}")
+        except Exception:
             continue
 
-        pc_entry = next(d for d in pc_results if d["frame"] == frame)
-        pitch_control = np.array(pc_entry["pitch_control_map"])  # (32, 50)
-        player_id = pc_entry["player_id"]
+        pc_entry = next((d for d in pc_results if d["frame"] == frame), None)
+        if pc_entry is None:
+            continue
 
+        ## Skip if player had possession
+        #if pc_entry.get("in_possession", False):
+        #    continue
+
+        pitch_control = np.array(pc_entry["pitch_control_map"])  # (32, 50)
         pitch_control_smooth = gaussian_filter(pitch_control, sigma=sigma)
+
+        player_id = pc_entry["player_id"]
 
         # ---------------------------
         # Load frame dataframe
         # ---------------------------
         df_path = f"{PROCESSED_DIR}/{match_id}.parquet"
-        
+
         if save_load_method == "gcp":
             with fs.open(df_path, "rb") as f:
                 df = pd.read_parquet(f)
         else:
             df = pd.read_parquet(df_path)
-            
+
         frame_df = df[df["frame"] == frame]
 
         team_in_pos = frame_df["team_in_possession"].iloc[0]
@@ -310,21 +315,21 @@ def plot_extreme_frames_pitch_control(
         # Draw pitch
         # ---------------------------
         pitch.draw(ax=ax)
-
         ax.set_xlim(105 / 2, 105)
         ax.set_ylim(0, 68)
 
-        # Heatmap
-        
-        x_edges = np.linspace(PITCH_LENGTH / 2, PITCH_LENGTH, pitch_control_smooth.shape[1] + 1)
-        y_edges = np.linspace(0, PITCH_WIDTH, pitch_control_smooth.shape[0] + 1)
+        # ---------------------------
+        # Heatmap (correct mplsoccer usage)
+        # ---------------------------
+        x_edges = np.linspace(105 / 2, 105, pitch_control_smooth.shape[1] + 1)
+        y_edges = np.linspace(0, 68, pitch_control_smooth.shape[0] + 1)
 
         bin_statistic = dict(
             statistic=pitch_control_smooth,
             x_grid=x_edges,
             y_grid=y_edges
         )
-        
+
         pcm = pitch.heatmap(
             bin_statistic,
             ax=ax,
@@ -333,50 +338,115 @@ def plot_extreme_frames_pitch_control(
             vmax=1,
             alpha=0.9
         )
+        
+        pcm_for_cbar = pcm
 
+        # ---------------------------
         # Players
+        # ---------------------------
         ax.scatter(
             attackers["x_rescaled"], attackers["y_rescaled"],
-            c="red", s=70, edgecolors="black", zorder=3
+            c="red", s=60, edgecolors="black", zorder=3, label="Attacking"
         )
 
         ax.scatter(
             defenders["x_rescaled"], defenders["y_rescaled"],
-            c="blue", s=70, edgecolors="black", zorder=3
+            c="blue", s=60, edgecolors="black", zorder=3, label="Defending"
         )
 
         # Ball
         if not ball.empty:
             ax.scatter(
                 ball["x_rescaled"], ball["y_rescaled"],
-                c="white", s=90, edgecolors="black", zorder=4
+                c="white", s=30, edgecolors="black", zorder=4
             )
 
-        # Target player (star)
+        # Target player (star, same color as team)
         if not player_row.empty:
             ax.scatter(
                 player_row["x_rescaled"],
                 player_row["y_rescaled"],
                 marker="*",
-                s=250,
-                c="yellow",
+                s=260,
+                c="red",
                 edgecolors="black",
                 zorder=5
             )
 
-        # Title
-        ax.set_title(
-            f"ΔxT = {delta_xt:.4f}",
-            fontsize=12
+        # Velocity arrows (small)
+        ax.quiver(
+            attackers["x_rescaled"], attackers["y_rescaled"],
+            attackers["vx_mps"], attackers["vy_mps"],
+            color="darkred",
+            angles="xy",
+            scale_units="xy",
+            scale=1,
+            width=0.008,
+            zorder=4
         )
 
+        ax.quiver(
+            defenders["x_rescaled"], defenders["y_rescaled"],
+            defenders["vx_mps"], defenders["vy_mps"],
+            color="navy",
+            angles="xy",
+            scale_units="xy",
+            scale=1,
+            width=0.008,
+            zorder=4
+        )
+
+        ax.set_title(f"iscT-Δ = {delta_xt:.4f}", fontsize=11)
+
     # -------------------------------------------------
-    # Global title
+    # Row labels
     # -------------------------------------------------
+    fig.text(0.01, 0.73, "TOP 3", fontsize=14, weight="bold", rotation=90)
+    fig.text(0.01, 0.28, "BOTTOM 3", fontsize=14, weight="bold", rotation=90)
+
+    # -------------------------------------------------
+    # Legend
+    # -------------------------------------------------
+    from matplotlib.lines import Line2D
+
+    legend_elements = [
+        Line2D([0], [0], marker="o", color="w", label="Attacking team",
+               markerfacecolor="red", markeredgecolor="black", markersize=10),
+        Line2D([0], [0], marker="o", color="w", label="Defending team",
+               markerfacecolor="blue", markeredgecolor="black", markersize=10),
+        Line2D([0], [0], marker="*", color="w", label="Target player",
+               markerfacecolor="red", markeredgecolor="black", markersize=14),
+    ]
+
+    fig.legend(handles=legend_elements, loc="lower center", ncol=3, bbox_to_anchor=(0.5, 0.02))
+
     fig.suptitle(
-        f"{player_name} — {game_situation[1]}\nTop / Bottom iscT-Δ frames",
-        fontsize=16
+        f"{player_name} — Attacking against {game_situation[1]} - Top3/Bottom3 iscT-Δ",
+        fontsize=16,
+        y=0.98
     )
 
+    # -------------------------------------------------
+    # Adjustment & Colorbar
+    # -------------------------------------------------
     plt.tight_layout()
+    
+    plt.subplots_adjust(right=0.88, bottom=0.1)
+
+    if pcm_for_cbar is not None:
+        cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7]) 
+        
+        cbar = fig.colorbar(
+            pcm_for_cbar,
+            cax=cbar_ax
+        )
+        cbar.set_label("Individual Pitch Control Probability", fontsize=12)
+        
+    plt.savefig(
+        "images/isct_delta_top3_bottom3.png",               # Le chemin/nom du fichier
+        dpi=300,                # Haute résolution (300 est standard pour l'impression/web propre)
+        bbox_inches='tight',    # CRUCIAL : empêche que tes légendes ou titres soient coupés
+        facecolor='white'       # Force le fond blanc (parfois transparent par défaut)
+    )
+
     plt.show()
