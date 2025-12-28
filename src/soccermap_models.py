@@ -1,5 +1,6 @@
 import fsspec
 import gcsfs
+from glob import glob
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -250,8 +251,6 @@ class SoccerMapPassSuccessDataset(Dataset):
         return self.transform(frame_df)
 
 def build_soccer_map_dataloaders(
-    fs,
-    frames_dir: str,
     task: str,
     dataset_class,
     dim: tuple = (64, 50),
@@ -259,6 +258,8 @@ def build_soccer_map_dataloaders(
     balance_ratio: float | None = None,
     test_size: float = 0.2,
     random_state: int = 42,
+    save_load_method: str = "gcp",
+    fs=None
 ):
     """
     Builds training and validation DataLoaders for xPass (pass probability) 
@@ -271,8 +272,6 @@ def build_soccer_map_dataloaders(
     4. Group-aware train/test splitting to prevent data leakage.
 
     Args:
-        fs (fsspec.filesystem): The filesystem object (e.g., GCSFileSystem).
-        frames_dir (str): Directory path containing *_normed.parquet files.
         task (str): The prediction task, either "pass" or "goal".
         dataset_class (class): The Dataset class to instantiate (e.g., SoccerMapPassSuccessDataset).
         dim (tuple): Input resolution for the CNN (height, width).
@@ -281,6 +280,8 @@ def build_soccer_map_dataloaders(
                                       If None, no balancing is performed.
         test_size (float): Proportion of the dataset to include in the validation split.
         random_state (int): Seed for random number generation.
+        save_load_method (str): 'local' or 'gcp'.
+        fs (fsspec.filesystem): Optional filesystem object for GCS.
 
     Returns:
         tuple: A tuple containing (train_loader, val_loader).
@@ -292,12 +293,24 @@ def build_soccer_map_dataloaders(
     # Load & concatenate parquet files
     # ---------------------------------------------------
     all_frames = []
-    files = fs.glob(f"{frames_dir}/*_normed.parquet")
+    
+    if save_load_method == "gcp":
+        if fs is None:
+            fs = gcsfs.GCSFileSystem()
+        files = fs.glob(f"{PROCESSED_DIR}/*.parquet")
+    elif save_load_method == "local":
+        files = glob(f"{PROCESSED_DIR_LOCAL}/*.parquet")
 
     for fpath in files:
-        with fs.open(fpath, "rb") as f:
-            df = pd.read_parquet(f)
+        if save_load_method == "gcp":
+            with fs.open(fpath, "rb") as f:
+                df = pd.read_parquet(f)
+        elif save_load_method == "local":
+            df = pd.read_parquet(fpath)
         all_frames.append(df)
+
+    if not all_frames:
+        raise ValueError(f"No files found")
 
     df = pd.concat(all_frames, ignore_index=True)
 
@@ -517,14 +530,16 @@ class PytorchSoccerMapModel(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr) # The optimizer updates all model parameters based on gradients from the loss function.
     
 ########## FUNCTIONS TO RUN MODEL PREDICTIONS, CALCULATE NEW METRICS AND PLOT THEM ON PITCH MAPS ##########
-    
+
 def predict_maps(
     match_id: int,
     df: pd.DataFrame = None,
     frame_results: list = None,
     frame: int = None,
-    model_local: bool = True,
+    player_position: str = None,
+    game_situation: tuple = None,
     sigma: float = 2.0,
+    save_load_method: str = "gcp"
 ):
     """
     Generates and plots 4 half-pitch visualization maps for a specific match frame:
@@ -537,8 +552,13 @@ def predict_maps(
 
     Args:
         match_id (int): The ID of the match to analyze.
-        tensorizer: Function to convert dataframe rows into model input tensors.
+        df (pd.DataFrame): Optional processed tracking dataframe input.
+        frame_results (list): Optional pre-loaded pitch control results.
+        frame (int): Specific frame to analyze.
+        player_position (str): The target player position group.
+        game_situation (tuple): The specific game situation filter (column, value).
         sigma (float): Standard deviation for Gaussian smoothing of the maps.
+        save_load_method (str): 'local' or 'gcp' for data loading.
 
     Returns:
         tuple:
@@ -549,11 +569,19 @@ def predict_maps(
     # --------------------------------------------------
     #  Pitch control for this frame
     # --------------------------------------------------
-    
+
     if frame_results is None:
-        pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
-        with fs.open(pitch_control_path, "rb") as f:
-            pitch_control_results = np.load(f, allow_pickle=True)["results"].tolist()
+        sub_dir = f"pitch_control_{player_position}_{game_situation[1]}"
+        if save_load_method == "gcp":
+            fs = gcsfs.GCSFileSystem()
+            PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/{sub_dir}"
+            pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+            with fs.open(pitch_control_path, "rb") as f:
+                pitch_control_results = np.load(f, allow_pickle=True)["results"].tolist()
+        elif save_load_method == "local":
+            PITCH_CONTROL_DIR = f"{BASE_LOCAL_PATH}/{sub_dir}"
+            pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+            pitch_control_results = np.load(pitch_control_path, allow_pickle=True)["results"].tolist()
     else:
         pitch_control_results = frame_results
     
@@ -575,7 +603,13 @@ def predict_maps(
     #  Model predictions (FULL pitch)
     # --------------------------------------------------
     if df is None:
-        df = read_parquet_gcs(fs, gcs_path=f"{PROCESSED_DIR}/{match_id}.parquet")
+        if save_load_method == "gcp":
+            fs = gcsfs.GCSFileSystem()
+            # Assuming read_parquet_gcs wraps pd.read_parquet with fs
+            df = pd.read_parquet(f"{PROCESSED_DIR}/{match_id}.parquet", storage_options={"token": "google_default"})
+        elif save_load_method == "local":
+            df = pd.read_parquet(f"{PROCESSED_DIR_LOCAL}/{match_id}.parquet")
+            
     frame_df = df.query("frame == @frame")
     frame_df['label'] = 0
     
@@ -583,13 +617,14 @@ def predict_maps(
     x, mask, _ = tensorizer(frame_df)
     x = x.unsqueeze(0)
     
-    if model_local:
-        best_ckpt_xpass_path = f"{MODELS_DIR}/best_xpass.ckpt"
-        best_ckpt_xthreat_path = f"{MODELS_DIR}/best_xthreat.ckpt"
+    # Model Loading (Untouched logic, just pathing)
+    if save_load_method == "local":
+        best_ckpt_xpass_path = f"{MODELS_DIR_LOCAL}/best_xpass.ckpt"
+        best_ckpt_xthreat_path = f"{MODELS_DIR_LOCAL}/best_xthreat.ckpt"
         
         model_xpass = load_checkpoint_from_local(best_ckpt_xpass_path, PytorchSoccerMapModel)
         model_xthreat = load_checkpoint_from_local(best_ckpt_xthreat_path, PytorchSoccerMapModel)
-    else:
+    elif save_load_method == "gcp":
         best_ckpt_xpass_path = f"{SOCCERMAP_MODELS_DIR}/best_xpass.ckpt"
         best_ckpt_xthreat_path = f"{SOCCERMAP_MODELS_DIR}/best_xthreat.ckpt"
 
@@ -755,9 +790,9 @@ def compute_metrics(
     meta: pd.DataFrame,
     df: pd.DataFrame = None,
     frame_results: list = None,
-    model_local: bool = True,
     batch_size: int = 1,
-    save_to_gcs: bool = False
+    save: bool = False,
+    save_load_method: str = "gcp"
 ):
     """
     Computes `iscT` and `iscT_delta` for an entire dataset using batch processing.
@@ -767,19 +802,26 @@ def compute_metrics(
 
     Args:
         meta (pd.DataFrame): Metadata dataframe containing match_ids and frames to process.
+        df (pd.DataFrame): Optional processed tracking dataframe input.
+        frame_results (list): Optional pre-loaded pitch control results.
         batch_size (int): Number of frames to process in a single inference pass.
+        save (bool): Whether to save the output.
+        save_load_method (str): 'local' or 'gcp' for data I/O.
 
     Returns:
         pd.DataFrame: The updated metadata dataframe with computed metrics columns.
     """
     
-    if model_local:
-        best_ckpt_xpass_path = f"{MODELS_DIR}/best_xpass.ckpt"
-        best_ckpt_xthreat_path = f"{MODELS_DIR}/best_xthreat.ckpt"
+    # Initialize GCS fs only if needed for reading/writing GCS
+    fs = gcsfs.GCSFileSystem() if save_load_method == "gcp" else None
+
+    if save_load_method == "local":
+        best_ckpt_xpass_path = f"{MODELS_DIR_LOCAL}/best_xpass.ckpt"
+        best_ckpt_xthreat_path = f"{MODELS_DIR_LOCAL}/best_xthreat.ckpt"
         
         model_xpass = load_checkpoint_from_local(best_ckpt_xpass_path, PytorchSoccerMapModel)
         model_xthreat = load_checkpoint_from_local(best_ckpt_xthreat_path, PytorchSoccerMapModel)
-    else:
+    elif save_load_method == "gcp":
         best_ckpt_xpass_path = f"{SOCCERMAP_MODELS_DIR}/best_xpass.ckpt"
         best_ckpt_xthreat_path = f"{SOCCERMAP_MODELS_DIR}/best_xthreat.ckpt"
 
@@ -803,13 +845,21 @@ def compute_metrics(
 
         # ---------- Pitch control ----------
         if frame_results is None:
-            PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/pitch_control_{player_position}_{game_situation}"
-            pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
-            if not fs.exists(pitch_control_path):
-                continue
-    
-            with fs.open(pitch_control_path, "rb") as f:
-                pc_results = np.load(f, allow_pickle=True)["results"].tolist()
+            # Determine paths based on method
+            if save_load_method == "gcp":
+                PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/pitch_control_{player_position}_{game_situation}"
+                pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+                if not fs.exists(pitch_control_path):
+                    continue
+                with fs.open(pitch_control_path, "rb") as f:
+                    pc_results = np.load(f, allow_pickle=True)["results"].tolist()
+            
+            elif save_load_method == "local":
+                PITCH_CONTROL_DIR = f"{BASE_LOCAL_PATH}/pitch_control_{player_position}_{game_situation}"
+                pitch_control_path = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+                if not os.path.exists(pitch_control_path):
+                    continue
+                pc_results = np.load(pitch_control_path, allow_pickle=True)["results"].tolist()
         else:
             pc_results = frame_results
 
@@ -817,11 +867,16 @@ def compute_metrics(
 
         # ---------- Frame data ----------
         if df is None:
-            df_path = f"{PROCESSED_DIR}/{match_id}.parquet"
-            if not fs.exists(df_path):
-                continue
-    
-            df_match = read_parquet_gcs(fs, df_path)
+            if save_load_method == "gcp":
+                df_path = f"{PROCESSED_DIR}/{match_id}.parquet"
+                if not fs.exists(df_path):
+                    continue
+                df_match = pd.read_parquet(df_path, storage_options={"token": "google_default"})
+            elif save_load_method == "local":
+                df_path = f"{PROCESSED_DIR_LOCAL}/{match_id}.parquet"
+                if not os.path.exists(df_path):
+                    continue
+                df_match = pd.read_parquet(df_path)
         else:
             df_match = df
 
@@ -868,10 +923,15 @@ def compute_metrics(
                 meta_out,
             )
     
-    if save_to_gcs:
-        RESULTS_DIR = f"{BASE_GCS_PATH}/results"
-        output_path = f"{RESULTS_DIR}/results_{player_position}_{game_situation}.parquet"
-        write_parquet_gcs(meta_out, output_path)
+    if save:
+        filename = f"results_{player_position}_{game_situation}.parquet"
+        if save_load_method == "gcp":
+            output_path = f"{RESULTS_DIR}/{filename}"
+            write_parquet_gcs(meta_out, output_path)
+        elif save_load_method == "local":
+            output_path = f"{RESULTS_DIR_LOCAL}/{filename}"
+            os.makedirs(RESULTS_DIR_LOCAL, exist_ok=True)
+            meta_out.to_parquet(output_path)
 
     return meta_out
 

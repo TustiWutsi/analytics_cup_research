@@ -1,6 +1,8 @@
 import os
+import glob
 import fsspec
 import gcsfs
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -20,7 +22,11 @@ import hdbscan
 from .config import *
 from .utils import *
 
-def prepare_clustering_features_all_matches(player_position: str, game_situation: tuple):
+def prepare_clustering_features_all_matches(
+    player_position: str, 
+    game_situation: tuple, 
+    save_load_method: str = "gcp"
+):
     """
     Transforms the raw results into a feature matrix suitable for clustering.
     Reads contextual information (player, team, minute, etc.) directly from 
@@ -40,6 +46,7 @@ def prepare_clustering_features_all_matches(player_position: str, game_situation
     Args:
         player_position (str): The target player position group.
         game_situation (tuple): The specific game situation filter (column, value).
+        save_load_method (str): 'local' or 'gcp'.
 
     Returns:
         tuple: 
@@ -48,37 +55,59 @@ def prepare_clustering_features_all_matches(player_position: str, game_situation
             - frames_inputs (list): List of raw dictionary inputs for reference.
     """
 
-    fs = gcsfs.GCSFileSystem()
     feature_vectors = []
     meta_info = []
     frames_inputs = []
     
-    PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/pitch_control_{player_position}_{game_situation[1]}"
-    pitch_control_files = fs.glob(f"{PITCH_CONTROL_DIR}/*.npz")
+    sub_dir = f"pitch_control_{player_position}_{game_situation[1]}"
+    
+    # --- 1. List files based on method ---
+    if save_load_method == "gcp":
+        fs = gcsfs.GCSFileSystem()
+        PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/{sub_dir}"
+        pitch_control_files = fs.glob(f"{PITCH_CONTROL_DIR}/*.npz")
+    elif save_load_method == "local":
+        PITCH_CONTROL_DIR = f"{BASE_LOCAL_PATH}/{sub_dir}"
+        # using pathlib for robustness, converting to string
+        pitch_control_files = [str(p) for p in Path(PITCH_CONTROL_DIR).glob("*.npz")]
+
     if not pitch_control_files:
         print(f"No files found in {PITCH_CONTROL_DIR}")
         return None, None, None
 
-    for gcs_path in tqdm(sorted(pitch_control_files)):
-        match_id = gcs_path.split("/")[-1].replace(".npz", "")
+    # --- 2. Iterate and Process ---
+    for file_path in tqdm(sorted(pitch_control_files)):
+        # Extract match_id relative to the path
+        if save_load_method == "gcp":
+            match_id = file_path.split("/")[-1].replace(".npz", "")
+        else:
+            match_id = Path(file_path).stem
 
         # --- Read the .npz file ---
         try:
-            with fs.open(gcs_path, "rb") as f:
-                data = np.load(f, allow_pickle=True)
+            if save_load_method == "gcp":
+                with fs.open(file_path, "rb") as f:
+                    data = np.load(f, allow_pickle=True)
+                    results = data["results"].tolist()
+            elif save_load_method == "local":
+                data = np.load(file_path, allow_pickle=True)
                 results = data["results"].tolist()
         except Exception as e:
-            print(f"Error reading {gcs_path} : {e}")
+            print(f"Error reading {file_path} : {e}")
             continue
 
         if not results:
             continue
 
         # --- Read the corresponding POSSESSION file ---
-        possession_path = f"{PROCESSED_DIR}/{match_id}.parquet"
         try:
-            with fs.open(possession_path, "rb") as fp:
-                possession_df = pd.read_parquet(fp)
+            if save_load_method == "gcp":
+                possession_path = f"{PROCESSED_DIR}/{match_id}.parquet"
+                with fs.open(possession_path, "rb") as fp:
+                    possession_df = pd.read_parquet(fp)
+            elif save_load_method == "local":
+                possession_path = f"{PROCESSED_DIR_LOCAL}/{match_id}.parquet"
+                possession_df = pd.read_parquet(possession_path)
         except Exception as e:
             print(f"Unable to read {possession_path} : {e}")
             possession_df = None
@@ -105,7 +134,6 @@ def prepare_clustering_features_all_matches(player_position: str, game_situation
             frame = item.get("frame")
 
             # (1) Flatten the Pitch Control map
-            # 
             pitch_flat = item["pitch_control_map"].flatten()
             
             # Remove outliers based on pitch control coverage
@@ -337,7 +365,16 @@ def prepare_clustering_features_single_match(
     meta = pd.DataFrame(meta_info)
     return X, meta
 
-def train_pca_kmeans_clustering(X, pca_components, n_clusters, dim=(32,50), save_to_gcs=False):
+def train_pca_kmeans_clustering(
+    X, 
+    pca_components, 
+    n_clusters, 
+    dim=(32,50), 
+    save: bool = False, 
+    save_load_method: str = "gcp",
+    player_position: str = "",
+    game_situation_value: str = ""
+):
     N_SPATIAL = dim[0]*dim[1]
     preprocessor = ColumnTransformer(
         transformers=[
@@ -369,13 +406,21 @@ def train_pca_kmeans_clustering(X, pca_components, n_clusters, dim=(32,50), save
     
     clustering_pipeline.fit(X)
     
-    if save_to_gcs:
-        fs = gcsfs.GCSFileSystem()
-        save_pipeline_gcs(
-            fs=fs,
-            gcs_path=PIPELINE_PATH,
-            pipeline=clustering_pipeline,
-        )
+    if save:
+        filename = f"clustering_pipeline_{player_position}_{game_situation_value}.joblib"
+        
+        if save_load_method == "gcp":
+            fs = gcsfs.GCSFileSystem()
+            PIPELINE_PATH = f"{CLUSTERING_DIR}/{filename}"
+            save_pipeline_gcs(
+                fs=fs,
+                gcs_path=PIPELINE_PATH,
+                pipeline=clustering_pipeline,
+            )
+        elif save_load_method == "local":
+            PIPELINE_PATH_LOCAL = f"{MODELS_DIR_LOCAL}/{filename}"
+            os.makedirs(os.path.dirname(PIPELINE_PATH_LOCAL), exist_ok=True)
+            joblib.dump(clustering_pipeline, PIPELINE_PATH_LOCAL)
         
     return clustering_pipeline
 
@@ -384,7 +429,7 @@ def predict_clusters(
     game_situation: tuple, 
     X, 
     meta, 
-    model_local: bool = False,
+    save_load_method: str = "gcp",
     cluster_mapping: dict = CLUSTERS_MAPPING
 ):
     """
@@ -396,7 +441,7 @@ def predict_clusters(
         game_situation (tuple): The specific game situation tuple (column, value).
         X (np.ndarray): The feature matrix input for the model.
         meta (pd.DataFrame): The metadata DataFrame to enrich.
-        local (bool): If True, loads the model from local storage; otherwise GCS.
+        save_load_method (str): 'local' or 'gcp' for data I/O.
         cluster_mapping (dict): Optional mapping to group raw clusters into semantic labels.
 
     Returns:
@@ -404,8 +449,12 @@ def predict_clusters(
     """
     situation_value = game_situation[1]
     mapping_key = f"{player_position}_{situation_value}"
+    
+    # We define fs here for GCS usage
+    fs = gcsfs.GCSFileSystem()
 
-    if not model_local:
+    if save_load_method == "gcp":
+        # --- GCP Loading ---
         PIPELINE_PATH_GCS = f"{CLUSTERING_DIR}/clustering_pipeline_{player_position}_{situation_value}.joblib"
         
         if fs.exists(PIPELINE_PATH_GCS):
@@ -427,12 +476,14 @@ def predict_clusters(
             meta["cluster"] = None
             meta['cluster_gathered'] = None
             
-    else:
-        PIPELINE_PATH_LOCAL = f"{MODELS_DIR}/clustering_pipeline_{player_position}_{situation_value}.joblib"
+    elif save_load_method == "local":
+        # --- Local Loading ---
+        PIPELINE_PATH_LOCAL = f"{MODELS_DIR_LOCAL}/{f'clustering_pipeline_{player_position}_{situation_value}.joblib'}"
         
         if os.path.exists(PIPELINE_PATH_LOCAL):
             try:
-                pipeline = load_pipeline_local(PIPELINE_PATH_LOCAL)
+                # Assuming load_pipeline_local is just joblib.load or similar wrapper
+                pipeline = joblib.load(PIPELINE_PATH_LOCAL) 
                 labels = pipeline.predict(X)
                 meta["cluster"] = labels
                 

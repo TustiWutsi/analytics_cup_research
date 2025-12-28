@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import fsspec
 import gcsfs
+import glob
 import io
 import pytorch_lightning as pl
 from sklearn.pipeline import Pipeline
@@ -72,20 +73,63 @@ def load_checkpoint_from_local(checkpoint_path: str, model_class: type[pl.Lightn
     model.eval()
     return model
 
-def concat_all_meta_from_gcs(
-    gcs_prefix: str = RESULTS_DIR,
-    fs: gcsfs.GCSFileSystem | None = None
-) -> pd.DataFrame:
+def concat_all_results(save_load_method: str = "gcp") -> pd.DataFrame:
+    """
+    Concatenates all result parquet files from the results directory.
 
-    fs = fs or gcsfs.GCSFileSystem()
+    Args:
+        save_load_method (str): 'local' or 'gcp'.
 
-    parquet_files = fs.glob(f"{gcs_prefix}/*.parquet")
-    if not parquet_files:
-        raise ValueError(f"No file found in the directory {gcs_prefix}")
-
+    Returns:
+        pd.DataFrame: The concatenated dataframe containing results from all matches.
+    """
     dfs = []
-    for path in parquet_files:
-        df = read_parquet_gcs(fs, path)
-        dfs.append(df)
+    files = []
+
+    # -------------------------------------------------
+    # 1. List files based on method
+    # -------------------------------------------------
+    if save_load_method == "gcp":
+        fs = gcsfs.GCSFileSystem()
+        # Assuming RESULTS_DIR is defined globally (e.g., "gs://my-bucket/results")
+        files = fs.glob(f"{RESULTS_DIR}/*.parquet")
+        
+        if not files:
+            raise ValueError(f"No file found in the directory {RESULTS_DIR}")
+
+        # -------------------------------------------------
+        # 2. Read files (GCP)
+        # -------------------------------------------------
+        for path in files:
+            try:
+                with fs.open(path, "rb") as f:
+                    df = pd.read_parquet(f)
+                dfs.append(df)
+            except Exception as e:
+                print(f"Error reading {path}: {e}")
+
+    elif save_load_method == "local":
+        # Assuming RESULTS_DIR_LOCAL is defined globally (e.g., "./data/results")
+        files = glob.glob(f"{RESULTS_DIR_LOCAL}/*.parquet")
+        
+        if not files:
+            raise ValueError(f"No file found in the directory {RESULTS_DIR_LOCAL}")
+
+        # -------------------------------------------------
+        # 2. Read files (Local)
+        # -------------------------------------------------
+        for path in files:
+            try:
+                df = pd.read_parquet(path)
+                dfs.append(df)
+            except Exception as e:
+                print(f"Error reading {path}: {e}")
+
+    # -------------------------------------------------
+    # 3. Concatenate
+    # -------------------------------------------------
+    if not dfs:
+        print("No dataframes loaded.")
+        return pd.DataFrame()
 
     return pd.concat(dfs, axis=0, ignore_index=True)

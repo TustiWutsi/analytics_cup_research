@@ -392,56 +392,6 @@ def normalize_tracking_direction(df_merged: pd.DataFrame) -> pd.DataFrame:
 
     return df_norm
 
-
-#def process_data(match_id: int, save_to_gcs=False) -> int:
-#    fs = gcsfs.GCSFileSystem()
-#    try:
-#        if save_to_gcs:
-#            outpath = f"{PROCESSED_DIR}/{match_id}.parquet"
-#            if fs.exists(outpath):
-#                print(f"{match_id} already processed")
-#                return match_id
-#
-#        # 1) Load base data
-#        tr = load_tracking_full_from_kloppy(match_id)
-#        ev = load_events_basic_from_github(match_id)
-#        meta = load_meta_from_github(match_id)
-#
-#        if tr is None or ev is None or meta is None or tr.empty or ev.empty or meta.empty:
-#            # Skip if any required input is missing
-#            return match_id
-#
-#        # 2) Compute velocities
-#        tr = compute_all_velocities(tr)
-#
-#        # 3) Merge metadata
-#        tr = tr.merge(meta, on=["match_id", "player_id"], how="left", validate="m:1")
-#        tr.loc[tr["is_ball"], ["team_id", "team_name", "team_short"]] = np.nan
-#
-#        # 4) Merge with events
-#        df_merged = merge_tracking_and_events(match_id, ev, tr)
-#
-#        # 5) Normalize attacking direction
-#        df_normed = normalize_tracking_direction(df_merged)
-#
-#        # 6) Sanity checks and cleaning
-#        if df_normed[["x_rescaled", "y_rescaled"]].isna().all().any():
-#            raise ValueError("Missing rescaled coordinates after normalization.")
-#
-#        df_normed = df_normed.dropna(subset=["x_rescaled", "y_rescaled"])
-#
-#        # 7) Write to GCS
-#        if save_to_gcs:
-#            write_parquet_gcs(df_normed, outpath)
-#
-#        return df_normed
-#
-#    except Exception as e:
-#        # Log error but do not interrupt batch execution
-#        print(f" Error processing {match_id}: {e}")
-#        traceback.print_exc()
-#        return match_id
-
 def process_data(match_id: int, save: bool = False, save_load_method: str = "gcp") -> int:
     """
     Process match data: load, compute velocities, merge metadata/events, normalize, and optionally save.

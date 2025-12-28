@@ -12,6 +12,7 @@ import concurrent.futures
 import fsspec
 import gcsfs
 from functools import partial
+import glob
 
 from .config import *
 from .utils import *
@@ -657,8 +658,9 @@ def extract_all_for_position_across_match(
     params: dict = PITCH_CONTROL_PARAMS,
     sample_size: int = None,
     resolution: int = 1,
-    pitch_length: float = 105,
-    pitch_width: float = 68
+    pitch_length: float = PITCH_LENGTH,
+    pitch_width: float = PITCH_WIDTH,
+    save_load_method: str = "gcp"
 ):
     """
     Calculates pitch control maps and player context for a given position,
@@ -669,10 +671,11 @@ def extract_all_for_position_across_match(
         player_position (str): The position group to filter.
         game_situation (tuple): Condition to filter frames (col_name, value).
         df (pd.DataFrame): Processed tracking dataframe of a single match.
-        params (dict): Simulation parameters.
+        params (dict): Pitch Control parameters.
         resolution (int): Grid resolution.
         pitch_length (float): Pitch length.
         pitch_width (float): Pitch width.
+        save_load_method (str): 'local' or 'gcp'
 
     Returns:
         list: A list of dictionaries containing frame data, pitch_control_map, 
@@ -683,10 +686,13 @@ def extract_all_for_position_across_match(
 
     # ---- Load dataframe ----
     if df is None:
-        df = pd.read_parquet(
-            f"{PROCESSED_DIR}/{match_id}.parquet",
-            storage_options={"token": "google_default"},
-        )
+        if save_load_method == "gcp":
+            df = pd.read_parquet(
+                f"{PROCESSED_DIR}/{match_id}.parquet",
+                storage_options={"token": "google_default"},
+            )
+        elif save_load_method == "local":
+            df = pd.read_parquet(f"{PROCESSED_DIR_LOCAL}/{match_id}.parquet")
 
     # Filter on game situation
     df = df[df[game_situation[0]] == game_situation[1]]
@@ -990,10 +996,11 @@ def plot_half_pitch_individual_pitch_control(
 def process_match(
     file_path: str,
     player_position: str,
-    #player_position_mapping: dict,
     game_situation: str,
     params: dict = PITCH_CONTROL_PARAMS,
-    resolution: int = 1
+    resolution: int = 1,
+    save: bool = False,
+    save_load_method: str = "gcp"
 ):
     """
     Function executed in parallel for a given match.
@@ -1005,16 +1012,29 @@ def process_match(
         game_situation (str): Specific game situation.
         params (dict): Simulation parameters.
         resolution (int): Grid resolution.
+        save (bool): Whether to save the output.
+        save_load_method (str): 'local' or 'gcp'.
     """
-    fs = gcsfs.GCSFileSystem()
-    
     match_id = Path(file_path).stem
-    PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/pitch_control_{player_position}_{game_situation[1]}"
-    outpath = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
-
-    if fs.exists(outpath):
-        print(f" File already exists for match {match_id}")
-        return match_id
+    sub_dir = f"pitch_control_{player_position}_{game_situation[1]}"
+    
+    # Define paths based on method
+    if save_load_method == "gcp":
+        fs = gcsfs.GCSFileSystem()
+        PITCH_CONTROL_DIR = f"{BASE_GCS_PATH}/{sub_dir}"
+        outpath = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+        
+        if save and fs.exists(outpath):
+            print(f" File already exists for match {match_id}")
+            return match_id
+            
+    elif save_load_method == "local":
+        PITCH_CONTROL_DIR = f"{BASE_LOCAL_PATH}/{sub_dir}"
+        outpath = f"{PITCH_CONTROL_DIR}/{match_id}.npz"
+        
+        if save and os.path.exists(outpath):
+            print(f" File already exists for match {match_id}")
+            return match_id
 
     print(f" Processing match {match_id}...")
     try:
@@ -1023,46 +1043,62 @@ def process_match(
             player_position=player_position,
             game_situation=game_situation,
             params=params,
-            resolution=1
+            resolution=resolution,
+            save_load_method=save_load_method
         )
-        save_npz_to_gcs({"results": results}, outpath)
-        print(f" File saved: {outpath}")
+        
+        if save:
+            if save_load_method == "gcp":
+                save_npz_to_gcs({"results": results}, outpath)
+                print(f" File saved: {outpath}")
+            elif save_load_method == "local":
+                os.makedirs(PITCH_CONTROL_DIR, exist_ok=True)
+                np.savez(outpath, results=results)
+                print(f" File saved: {outpath}")
+                
     except Exception as e:
         print(f" Error on match {match_id} : {e}")
+        
     return match_id
 
 def process_all_matches_parallel(
     player_position: str,
     game_situation: tuple,
-    #player_position_mapping: dict = PLAYER_POSITION_MAPPING,
     pitch_control_model_params: dict = PITCH_CONTROL_PARAMS,
     pitch_control_resolution: int = 1,
     max_workers: int = 10,
+    save: bool = False,
+    save_load_method: str = "gcp"
 ):
     """
     Processes all detected matches in parallel to compute pitch control metrics.
 
     Args:
         player_position (str): The target player position to analyze.
-        player_position_mapping (dict): A dictionary mapping position names to internal IDs or codes.
         game_situation (tuple): A tuple (column, value) defining the specific game situation to filter.
         pitch_control_model_params (dict): Parameters for the pitch control model.
         pitch_control_resolution (int): The resolution grid size for pitch control calculations.
         max_workers (int): The maximum number of parallel workers.
+        save (bool): Whether to save the output.
+        save_load_method (str): 'local' or 'gcp'.
     """
     
-    fs = gcsfs.GCSFileSystem()
-    parquet_files = fs.glob(f"{PROCESSED_DIR}/*.parquet")
+    if save_load_method == "gcp":
+        fs = gcsfs.GCSFileSystem()
+        parquet_files = fs.glob(f"{PROCESSED_DIR}/*.parquet")
+    elif save_load_method == "local":
+        parquet_files = glob.glob(f"{PROCESSED_DIR_LOCAL}/*.parquet")
 
     print(f"{len(parquet_files)} matches detected")
 
     worker = partial(
         process_match,
         player_position=player_position,
-        #player_position_mapping=player_position_mapping,
         game_situation=game_situation,
         params=pitch_control_model_params,
-        resolution=pitch_control_resolution
+        resolution=pitch_control_resolution,
+        save=save,
+        save_load_method=save_load_method
     )
 
     with concurrent.futures.ProcessPoolExecutor(

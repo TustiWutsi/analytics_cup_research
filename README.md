@@ -23,30 +23,40 @@ _⚠️ Not adhering to these submission rules and the [**Analytics Cup Rules**]
 
 ## Research Track Abstract Template (max. 500 words)
 #### Introduction
-L'objectif de ce projet est de créer une méthode qui permettrait d'analyser et d'évaluer les espaces contrôlés par un joueur au cours de situation de jeu bien précises.
-Mon constat de base : les principales études qui exploitent les modèles de Pitch Control se concentrent sur l'occupation des espaces par une équipe dans son ensemble, et pas spécifiquement par un joueur.
-Pourtant, cela permet de répondre à de nombreuses questions :
-- Comment un joueur se positionne par rapport aux autres joueurs (c'est ça l'intérêt d'analyser le Pitch Control plutôt qu'une heatmap de positions de jeu) ?
-- Quels sont les types d'espaces qu'il a pour habitude de contrôler ? Quel est son profil de contrôle d'espace ?
-- Ces espaces contrôlés sont-ils pertinents (accessibles par la passe) et dangereux (augmentent la proba de marquer) ?
+The goal of this project is to propose a **method to analyze and evaluate the spaces controlled by an individual player in well-defined game situations**.
 
-Cette approche est encore plus pertinente pour les postes qui ont moins le ballon, comme les attaquants par exemple.
-Elle permet d'ailleurs d'apporter une évaluation plus globale d'un joueur : un joueur qui touche peu le ballon et fait peu d'actions décisives fait-il forcément un mauvais match ? Pas forcément : il peut potentiellement contrôlés des espaces accessibles et dangereux sans jamais être servis, ce qui dans ce cas pourrait également permettre de pénaliser la performance de ses coéquipiers.
+My initial observation is that most existing studies leveraging Pitch Control models focus on space occupation at the team level, rather than at the individual player level. However, analyzing space control per player makes it possible to address several important questions:
+- How does a player position himself relative to other players (which is precisely the advantage of Pitch Control over simple positional heatmaps)?
+- What types of spaces does a player usually control? What is their space control profile?
+- Are these controlled spaces relevant (i.e. reachable by a pass) and dangerous (i.e. do they increase the probability of scoring)?
+
+This approach is especially relevant for positions that interact less with the ball, such as forwards. It enables a more holistic evaluation of player performance: a player who rarely touches the ball and produces few decisive actions does not necessarily have a poor game. They may still control accessible and dangerous spaces without being served, which in turn could highlight limitations in their teammates’ decision-making.
 
 #### Methods
-La méthode se décompose en 3 étapes principales (à chaque fois en filtrant sur une player_position et une game_situation précises):
-- On calcule le Pitch Control au niveau individuel ("IPV" : Individual Pitch Control) : on applique [la méthode de Pitch Control physics-based de William Spearman](https://www.researchgate.net/publication/334849056_Quantifying_Pitch_Control), sauf qu'au lieu de sommer les probas de tous les joueurs des 2 équipes, on prend la proba d'un seul joueur contre la somme des probas des joueurs adverses.
-- On décide ensuite de catégoriser ces espaces pour mieux les interpréter, à l'aide d'une méthode non supervisée. Un modèle K-means donne des zones très cohérentes, et un modèle Hdbscan (précédé d'une réduction de dimension non linéaire comme Umap) permet d'aller en plus loin en distinguant les format des espaces (mais c'est beaucoup plus long pour fitter).
-- Enfin, afin d'évaluer ces espaces, on entraîne des modèles de xPass et xT à partir de [la méthode de Deep Learning CNN Soccermap](https://arxiv.org/abs/2010.10202).
+The methodology is structured into three main steps (each time filtering on a specific player_position and game_situation):
 
-We introduce the metric **"iscT" : Individual Space Controlled Threat** :
-- It is the weighted average of the xT of the spaces controlled by the player, weighted by the Individual Pitch Control and the xPass probabilities
-- Intuition : the more likely the player is to control the space — and for a pass into that space to be successful — the more weight we assign to the xT
+**Individual Pitch Control (IPV)**
+We compute Pitch Control at the individual level by adapting [William Spearman’s physics-based Pitch Control model](https://www.researchgate.net/publication/334849056_Quantifying_Pitch_Control).
+Instead of summing the control probabilities of all players from both teams, we compute the probability of a single player against the sum of the probabilities of the opposing team’s players.
 
+**Spatial categorization of controlled areas**
+To better interpret the controlled spaces, we cluster them using unsupervised learning methods (a K-means model produces coherent spatial zones, and a UMAP-HDBSCAN model allows for a finer characterization of space shapes)
 
-To make this metric usable — i.e. to be able to compare different situations and different players — we prefer to analyze how much these controlled spaces would increase the probability of scoring compared to the on-ball xT : **iscT-Δ : Individual Space Controlled Threat Increase**
+**Evaluation of controlled spaces**
+To assess the value of these spaces, we train xPass and xT models based on the [deep-learning Soccermap approach](https://arxiv.org/abs/2010.10202).
+
+We introduce the metric **iscT-Δ — Individual Space Controlled Threat Delta**:
+- It is defined as the weighted average of the difference between the xT values of the spaces controlled by the player and the xT of where the ball is, weighted by both the Individual Pitch Control and the xPass probability.
+- Intuition: the more likely a player is to control a space — and the more likely a pass into that space is to be successful — the more weight is assigned to the incremental xT gain.
+<img src="images/isct_delta.png" width="600">
 
 #### Results
-La promesse de ce repo : il suffit de donner en input une liste de macth_id, une player_position et une game_situation, et le code effectura toutes les étapes listées au-dessus pour tous ces matchs.
+The results highlight several key findings:
+- Players exhibit very diverse profiles in terms of the types of spaces they control.
+- Truly “complete” players are rare: no player consistently creates relevant and dangerous spaces (iscT-Δ) across all game situations; instead, each player tends to have preferred contexts in which they are most effective.
+- Use case example: for a given game situation, one can focus on the three best and three worst frames according to the iscT-Δ metric in order to provide concrete positional recommendations to a player.
 
 #### Conclusion
+This method is computationally demanding, as it strongly depends on the quality of the Soccermap models (which themselves require a large number of frames). However, it provides a more holistic view of a player’s true performance.
+
+As a next step, a promising direction would be to integrate this framework into an EPV-based model, enabling a unified valuation of space, actions, and outcomes.
