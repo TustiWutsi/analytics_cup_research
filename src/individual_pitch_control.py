@@ -877,7 +877,8 @@ def plot_half_pitch_individual_pitch_control(
         alpha=0.9
     )
 
-    plt.colorbar(pcm, ax=ax, fraction=0.046, pad=0.04)
+    cbar = plt.colorbar(pcm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Individual Pitch Control Probability", fontsize=12)
 
     # ------------------------------------------------------------------
     # Players
@@ -965,7 +966,7 @@ def plot_half_pitch_individual_pitch_control(
     # Title
     # ------------------------------------------------------------------
     ax.set_title(
-        f"Individual Pitch Control - {player_name} - {minute}'",
+        f"Individual Pitch Control (IPC) - {player_name} - {minute}'",
         fontsize=14
     )
 
@@ -991,6 +992,14 @@ def plot_half_pitch_individual_pitch_control(
 
     ax.legend(loc="upper left")
     plt.tight_layout(rect=[0, 0.05, 1, 1])
+    
+    #plt.savefig(
+    #    "images/ipc_example.png",
+    #    dpi=300,               
+    #    bbox_inches='tight',    
+    #    facecolor='white'
+    #)
+    
     plt.show()
 
 def process_match(

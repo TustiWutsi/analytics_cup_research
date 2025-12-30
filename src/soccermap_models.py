@@ -751,14 +751,14 @@ def predict_maps(
         line_color="black"
     )
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(1, 4, figsize=(24, 7))
     axes = axes.flatten()
 
     titles = [
         "Individual Pitch Control (IPC)",
         "xPass",
         "xT",
-        "IPC × xPass × xThreat"
+        "IPC × xPass × xT"
     ]
 
     maps = [
@@ -816,17 +816,28 @@ def predict_maps(
         ax.scatter(player_row["x_rescaled"], player_row["y_rescaled"],
                    marker="*", s=220, c="red", edgecolors="black", zorder=5)
 
-        ax.set_title(title, fontsize=13)
-        plt.colorbar(im, ax=ax, fraction=0.035)
+        ax.set_title(title, fontsize=14, pad=0.5)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.01)
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3)
 
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    
     plt.suptitle(
-        f"Indivisual Space Controlled Threat (iscT) maps decomposition — {match_name}\nFocus Player: {player_name}",
-        fontsize=16
+        f"iscT-Δ - Maps decomposition — {match_name} - Focus Player: {player_name}",
+        fontsize=16,
+        y=1,
+        x=0.5
     )
-    plt.tight_layout()
+    
+    #plt.savefig(
+    #    "images/ipct_delta_maps_decomposition.png",
+    #    dpi=300,               
+    #    bbox_inches='tight',    
+    #    facecolor='white'
+    #)
+    
     plt.show()
 
     return iscT, iscT_delta

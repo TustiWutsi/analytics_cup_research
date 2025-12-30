@@ -169,6 +169,14 @@ def plot_player_percentiles(
     cbar.set_label(f"Percentile (within {dimension_col})", fontsize=11)
 
     plt.tight_layout()
+    
+    #plt.savefig(
+    #    "images/percentiles_isct_delta_per_cluster.png",
+    #    dpi=300,               
+    #    bbox_inches='tight',    
+    #    facecolor='white'
+    #)
+    
     plt.show()
 
     return pivot_percentiles
@@ -445,11 +453,11 @@ def plot_top_bottom_isct_delta(
         )
         cbar.set_label("Individual Pitch Control Probability", fontsize=12)
         
-    plt.savefig(
-        "images/isct_delta_top3_bottom3.png",               # Le chemin/nom du fichier
-        dpi=300,                # Haute résolution (300 est standard pour l'impression/web propre)
-        bbox_inches='tight',    # CRUCIAL : empêche que tes légendes ou titres soient coupés
-        facecolor='white'       # Force le fond blanc (parfois transparent par défaut)
-    )
+    #plt.savefig(
+    #    "images/isct_delta_top3_bottom3.png",
+    #    dpi=300,               
+    #    bbox_inches='tight',    
+    #    facecolor='white'
+    #)
 
     plt.show()

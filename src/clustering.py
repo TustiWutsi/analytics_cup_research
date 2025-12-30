@@ -607,7 +607,7 @@ def plot_cluster_summary_pitch_control(
         pcm = pitch.heatmap(
             bin_statistic,
             ax=ax,
-            cmap=cmap,
+            cmap='viridis',
             vmin=0,
             vmax=1,
             alpha=0.9,
@@ -651,6 +651,13 @@ def plot_cluster_summary_pitch_control(
         cbar_ax = fig.add_axes([0.94, 0.05, 0.01, 0.7])
         cbar = fig.colorbar(pcm, cax=cbar_ax)
         cbar.set_label("Mean Pitch Control Probability", fontsize=11)
+        
+    #plt.savefig(
+    #    "images/ipc_clusters_center_forward_low_block.png",
+    #    dpi=300,               
+    #    bbox_inches='tight',    
+    #    facecolor='white'
+    #)
 
     plt.show()
     
@@ -710,4 +717,12 @@ def plot_players_cluster_distribution(
     )
 
     plt.tight_layout()
+    
+    #plt.savefig(
+    #    "images/ipc_clusters_distribution_center_forward_low_block.png",
+    #    dpi=300,               
+    #    bbox_inches='tight',    
+    #    facecolor='white'
+    #)
+    
     plt.show()
